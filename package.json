@@ -1,0 +1,6 @@
+{
+  "name": "speedtest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Internet speed test with own backend (Vercel Edge Functions)"
+}

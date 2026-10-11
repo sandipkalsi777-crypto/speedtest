@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Internet Speed Test</title>
+<style>
+:root{--bg:#0e2a47;--panel:#14375c;--ink:#f2f7fb;--mute:#8fb0cf;--dl:#3dd6c6;--ul:#ffb547;--line:#25507c}
+@media (prefers-color-scheme:light){:root{--bg:#eef4fa;--panel:#fff;--ink:#0e2a47;--mute:#5b7a98;--dl:#00a896;--ul:#d98200;--line:#cfdceb}}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{background:var(--bg);color:var(--ink);font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;display:flex;justify-content:center;padding:24px 16px}
+main{width:100%;max-width:560px}
+h1{font-size:1.4rem;margin:0 0 4px;font-weight:700}
+.sub{color:var(--mute);margin:0 0 24px;font-size:.95rem}
+.gauge{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:28px 20px;text-align:center}
+.phase{color:var(--mute);font-size:1rem;min-height:1.4em}
+.speed{font-size:5rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;margin:8px 0 0}
+.unit{color:var(--mute);font-size:1.1rem}
+.bar{height:8px;border-radius:4px;background:var(--line);margin:20px 0 24px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--dl);transition:width .2s,background .3s}
+button{font:inherit;font-weight:700;font-size:1.1rem;background:var(--dl);color:#062033;border:0;border-radius:40px;padding:14px 44px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
+.res{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:16px}
+.res div{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+.res b{display:block;font-size:1.6rem;font-variant-numeric:tabular-nums;margin-top:4px}
+.res span{color:var(--mute);font-size:.9rem}
+.res .dl b{color:var(--dl)}.res .ul b{color:var(--ul)}
+.srv{color:var(--mute);font-size:.85rem;margin-top:16px;text-align:center}
+.err{color:#ff7a7a;margin-top:12px;font-size:.95rem}
+</style>
+</head>
+<body>
+<main>
+  <h1>Internet Speed Test</h1>
+  <p class="sub">Apne connection ki asli speed check karein.</p>
+
+  <section class="gauge" aria-live="polite">
+    <div class="phase" id="phase">Test shuru karne ke liye button dabayein</div>
+    <div class="speed" id="speed">0.0</div>
+    <div class="unit">Mbps</div>
+    <div class="bar"><i id="bar"></i></div>
+    <button id="go">Test shuru karein</button>
+    <div class="err" id="err" role="alert"></div>
+  </section>
+
+  <section class="res">
+    <div class="dl"><span>Download</span><b id="rDl">—</b></div>
+    <div class="ul"><span>Upload</span><b id="rUl">—</b></div>
+    <div><span>Ping</span><b id="rPing">—</b></div>
+    <div><span>Jitter</span><b id="rJit">—</b></div>
+  </section>
+  <div class="srv" id="srv"></div>
+</main>
+
+<script>
+const BASE = "";
+const $ = id => document.getElementById(id);
+const DURATION = 8000;   // ms per download/upload phase
+const STREAMS = 4;       // parallel connections
+
+function setPhase(t, color){ $("phase").textContent = t; $("bar").style.background = color || "var(--dl)"; }
+function setSpeed(v){ $("speed").textContent = v.toFixed(v >= 100 ? 0 : 1); }
+
+async function ping(){
+  const times = [];
+  for(let i = 0; i < 10; i++){
+    const t0 = performance.now();
+    await fetch(BASE + "/api/ping?r=" + Math.random(), {cache:"no-store"});
+    times.push(performance.now() - t0);
+    $("bar").style.width = ((i + 1) / 10 * 100) + "%";
+  }
+  times.shift(); // pehla request connection setup ka hota hai
+  const avg = times.reduce((a,b) => a + b) / times.length;
+  const jit = times.slice(1).reduce((a,t,i) => a + Math.abs(t - times[i]), 0) / (times.length - 1);
+  return {ping: Math.min(...times), jitter: jit};
+}
+
+async function download(){
+  let bytes = 0, start = performance.now(), stop = false;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => { stop = true; ctrl.abort(); }, DURATION);
+  const tick = setInterval(() => {
+    const s = (performance.now() - start) / 1000;
+    setSpeed(bytes * 8 / s / 1e6);
+    $("bar").style.width = Math.min(100, (s * 1000 / DURATION) * 100) + "%";
+  }, 150);
+  async function worker(){
+    while(!stop){
+      try{
+        const r = await fetch(BASE + "/api/download?bytes=25000000&r=" + Math.random(), {cache:"no-store", signal: ctrl.signal});
+        const rd = r.body.getReader();
+        while(true){ const {done, value} = await rd.read(); if(done) break; bytes += value.length; }
+      }catch(e){ if(!stop) throw e; }
+    }
+  }
+  await Promise.all(Array.from({length: STREAMS}, worker));
+  clearTimeout(timer); clearInterval(tick);
+  return bytes * 8 / ((performance.now() - start) / 1000) / 1e6;
+}
+
+function upload(){
+  return new Promise((resolve, reject) => {
+    const chunk = new Uint8Array(2e6); // 2 MB per request (Vercel limit 4.5 MB)
+    const blob = new Blob([chunk]);
+    let total = 0, start = performance.now(), stop = false, active = 0;
+    const loaded = new Array(STREAMS).fill(0);
+    const tick = setInterval(() => {
+      const s = (performance.now() - start) / 1000;
+      setSpeed(total * 8 / s / 1e6);
+      $("bar").style.width = Math.min(100, (s * 1000 / DURATION) * 100) + "%";
+      if(s * 1000 >= DURATION){ stop = true; }
+      if(stop && active === 0){ clearInterval(tick); resolve(total * 8 / s / 1e6); }
+    }, 150);
+    function send(i){
+      if(stop) return;
+      active++;
+      const x = new XMLHttpRequest();
+      x.open("POST", BASE + "/api/upload?r=" + Math.random());
+      x.upload.onprogress = e => { total += e.loaded - loaded[i]; loaded[i] = e.loaded; };
+      x.onload = () => { loaded[i] = 0; active--; send(i); };
+      x.onerror = () => { active--; if(!stop){ clearInterval(tick); reject(new Error("Upload fail ho gaya")); } };
+      x.send(blob);
+    }
+    for(let i = 0; i < STREAMS; i++) send(i);
+  });
+}
+
+async function serverInfo(){
+  try{
+    const o = await (await fetch(BASE + "/api/info", {cache:"no-store"})).json();
+    const place = [o.city, o.country].filter(Boolean).join(", ");
+    $("srv").textContent = "Server: " + (o.region || "Vercel Edge") + (place ? " (" + place + ")" : "") + " \u00b7 Aapka IP: " + o.ip;
+  }catch(e){}
+}
+
+$("go").onclick = async () => {
+  const btn = $("go"); btn.disabled = true; $("err").textContent = "";
+  ["rDl","rUl","rPing","rJit"].forEach(id => $(id).textContent = "—");
+  try{
+    setPhase("Ping naap rahe hain…", "var(--mute)"); setSpeed(0);
+    await serverInfo();
+    const p = await ping();
+    $("rPing").textContent = p.ping.toFixed(0) + " ms";
+    $("rJit").textContent = p.jitter.toFixed(1) + " ms";
+
+    setPhase("Download test chal raha hai…", "var(--dl)"); $("bar").style.width = "0";
+    const d = await download();
+    $("rDl").textContent = d.toFixed(1) + " Mbps";
+
+    setPhase("Upload test chal raha hai…", "var(--ul)"); $("bar").style.width = "0";
+    const u = await upload();
+    $("rUl").textContent = u.toFixed(1) + " Mbps";
+
+    setSpeed(d); setPhase("Test poora hua. Download speed dikhayi gayi hai.");
+    $("bar").style.width = "100%";
+  }catch(e){
+    $("err").textContent = "Test fail hua: " + e.message + ". Internet check karein aur dobara try karein.";
+    setPhase("Test ruk gaya");
+  }
+  btn.textContent = "Dobara test karein"; btn.disabled = false;
+};
+</script>
+</body>
+</html>
